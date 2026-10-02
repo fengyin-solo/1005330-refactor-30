@@ -43,7 +43,17 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            <button
+              v-if="column === '领用单号'"
+              class="link"
+              type="button"
+              @click="openDetail(row)"
+            >
+              {{ requisitionNo(row) }}
+            </button>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
@@ -67,6 +77,32 @@
       <span>共 {{ total }} 条工具领用记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <aside v-if="detailRow" class="detail-panel">
+      <header class="detail-head">
+        <h3>领用单详情 · {{ requisitionNo(detailRow) }}</h3>
+        <button class="btn ghost" type="button" @click="closeDetail">关闭</button>
+      </header>
+      <dl class="detail-grid">
+        <div v-for="field in columns" :key="field" class="detail-item">
+          <dt>{{ field }}</dt>
+          <dd v-if="field === '领用单号'">{{ requisitionNo(detailRow) || '—' }}</dd>
+          <dd v-else>{{ detailRow[field] ?? '—' }}</dd>
+        </div>
+        <div class="detail-item">
+          <dt>当前状态</dt>
+          <dd>{{ detailRow.status }}</dd>
+        </div>
+        <div class="detail-item">
+          <dt>安全巡查同步</dt>
+          <dd v-if="detailSafetyRow">
+            已同步（{{ detailSafetyRow['巡查编号'] }} · {{ detailSafetyRow.status }}）
+          </dd>
+          <dd v-else>归还办结后同步</dd>
+        </div>
+      </dl>
+      <p class="detail-flow">状态顺次推进：待领用 → 使用中 → 已归还 → 已报损，不允许从已归还倒着回。</p>
+    </aside>
   </section>
 </template>
 
@@ -79,6 +115,7 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { readRequisitionNo, safetySyncCodeForTool } from '@/data/tool-rules'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('tool')
@@ -92,12 +129,38 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+// 详情面板与列表共用 readRequisitionNo，保证两处读到的领用单号始终一致。
+const detailRow = ref<EntryRow | null>(null)
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+function requisitionNo(row: EntryRow): string {
+  return readRequisitionNo(row)
+}
+
+const detailSafetyRow = computed<EntryRow | null>(() => {
+  if (!detailRow.value) {
+    return null
+  }
+  const syncCode = safetySyncCodeForTool(detailRow.value.id)
+  return listEntries('safety').items.find((row) => String(row['巡查编号']) === syncCode) ?? null
+})
+
+function snapshot(row: EntryRow): EntryRow {
+  return { ...row }
+}
+
+function openDetail(row: EntryRow) {
+  detailRow.value = snapshot(row)
+}
+
+function closeDetail() {
+  detailRow.value = null
+}
 
 function resetFilters() {
   filters.value = {}
@@ -120,6 +183,12 @@ function runAction(action: string, row: EntryRow) {
     return
   }
   reload()
+  if (detailRow.value && Number(detailRow.value.id) === Number(row.id)) {
+    const latest = rows.value.find((item) => Number(item.id) === Number(row.id))
+    if (latest) {
+      detailRow.value = snapshot(latest)
+    }
+  }
 }
 
 function reload() {
@@ -128,6 +197,10 @@ function reload() {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    if (detailRow.value) {
+      const latest = rows.value.find((item) => Number(item.id) === Number(detailRow.value?.id))
+      detailRow.value = latest ? snapshot(latest) : detailRow.value
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '工具领用列表读取失败'
   }

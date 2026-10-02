@@ -1,5 +1,13 @@
 import { MODULE_BY_KEY } from '@/data/modules'
 import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import {
+  TOOL_ACTION_TARGETS,
+  isToolTerminal,
+  judgeToolCloseout,
+  judgeToolFlow,
+  readRequisitionNo,
+  safetySyncCodeForTool,
+} from '@/data/tool-rules'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
@@ -30,7 +38,7 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
 
 export function runAction(key: string, id: number, action: string): ActionResult {
   const meta = moduleMeta(key)
-  const target = meta.actionTargets[action]
+  const target = key === 'tool' ? TOOL_ACTION_TARGETS[action] : meta.actionTargets[action]
   if (!target) {
     return { ok: false, message: `${meta.entity}没有登记「${action}」这个动作` }
   }
@@ -43,17 +51,62 @@ export function runAction(key: string, id: number, action: string): ActionResult
   if (current === target) {
     return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
   }
+  if (key === 'tool') {
+    // 工具领用只走顺次推进的硬流转；归还、报损两个入口共用同一份办结判定。
+    const flow = judgeToolFlow(current, target)
+    if (!flow.ok) {
+      return flow
+    }
+    if (target === '已归还' || target === '已报损') {
+      const verdict = judgeToolCloseout(rows, rows[index], target)
+      if (!verdict.ok) {
+        return verdict
+      }
+    }
+  }
   const lastStatus = meta.statuses[meta.statuses.length - 1]
   const updated: EntryRow = {
     ...rows[index],
     status: target,
-    pending: target !== lastStatus,
+    pending: key === 'tool' ? !isToolTerminal(target) : target !== lastStatus,
     abnormal: NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb)),
   }
   const next = [...rows]
   next[index] = updated
   saveRows(key, next)
+  if (key === 'tool' && target === '已归还') {
+    syncToolReturnToSafety(updated)
+  }
   return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
+}
+
+// 归还办结后把结论同步到安全巡查清单；同一张领用单重复同步只更新不新增。
+function syncToolReturnToSafety(toolRow: EntryRow): void {
+  const safetyRows = [...listRows('safety')]
+  const syncCode = safetySyncCodeForTool(toolRow.id)
+  const requisitionNo = readRequisitionNo(toolRow)
+  const payload: EntryRow = {
+    id: 0,
+    status: '已整改',
+    pending: false,
+    abnormal: false,
+    巡查编号: syncCode,
+    巡查区域: '工具归还核查',
+    巡查类别: '工具领用归还',
+    隐患描述: `领用单号 ${requisitionNo} 已归还办结，核对规格型号与领用数量一致`,
+    整改措施: '归还办结自动同步，无需整改',
+    巡查人: String(toolRow['领用人'] ?? ''),
+    巡查日期: String(toolRow['归还日期'] ?? ''),
+    巡查状态: '已整改',
+  }
+  const index = safetyRows.findIndex((row) => String(row['巡查编号']) === syncCode)
+  if (index >= 0) {
+    safetyRows[index] = { ...payload, id: safetyRows[index].id }
+  } else {
+    const nextId = safetyRows.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0) + 1
+    safetyRows.push({ ...payload, id: nextId })
+  }
+  saveRows('safety', safetyRows)
 }
 
 export function resetModule(key: string): PageResult {
