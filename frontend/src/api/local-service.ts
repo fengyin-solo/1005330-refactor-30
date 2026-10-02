@@ -1,5 +1,7 @@
 import { MODULE_BY_KEY } from '@/data/modules'
 import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import { runToolAction } from './tool-service'
+import { TOOL_KEY, type ToolActionPayload } from '@/data/tool-flow'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
@@ -28,7 +30,16 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
   return { items: matched, total: matched.length, page: 1, size: matched.length }
 }
 
-export function runAction(key: string, id: number, action: string): ActionResult {
+export function runAction(
+  key: string,
+  id: number,
+  action: string,
+  payload?: ToolActionPayload,
+): ActionResult {
+  // 工具领用的归还/报损有自己的共用口径，两个入口都由 tool-service 统一处理。
+  if (key === TOOL_KEY) {
+    return runToolAction(id, action, payload)
+  }
   const meta = moduleMeta(key)
   const target = meta.actionTargets[action]
   if (!target) {
